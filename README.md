@@ -6,7 +6,7 @@ After installation you will need to donwload and install some required packages.
 
 ```{r}
 install.packages(c("Biocmanager"))
-BiocManager::install(c("DESeq2", "ggplot2", "pheatmap", "GenomicFeatures", "remotes"))
+BiocManager::install(c("DESeq2", "ggplot2", "pheatmap", "GenomicFeatures", "remotes", "patchwork"))
 
 remotes::install_github("js229/Vennerable")
 ```

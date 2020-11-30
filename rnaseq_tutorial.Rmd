@@ -1,0 +1,257 @@
+---
+title: "Differential Expression Tutorial"
+output: html_notebook
+---
+
+# Introduction
+
+Here we are going to run a toy differential expression example at gene level using [DESeq2]() package. We will read count data from a `
+.csv`file along with it’s metadata and identify deferentially expressed genes between two groups.
+
+## The Data
+
+The data is coming from the [pasilla]() package. You can find additonal details in the link. We have a count matrix, 
+and metadata describing different attributes of the samples such as sample name, treatment, library type. This metadata we will call `coldata`.
+
+## Dependencies
+
+We will use several different R packages for this analysis. These packages also have their own dependencies. Using an installation 
+manager called `BiocManager` we can streamline this process. Please make sure that you run these commands before the lecture so your 
+system is ready for analysis.
+
+```{r}
+install.packages(c("Biocmanager"))
+BiocManager::install(c("DESeq2", "ggplot2", "pheatmap", "GenomicFeatures", "remotes", "patchwork"))
+
+remotes::install_github("js229/Vennerable")
+```
+
+## Working Directory
+
+The below line of code will set your working directory. When we are loading data we will be specifying file names and if they are not in our working directory R will give an error. 
+
+The current line of code is for my computer please change it to wherever you have downloaded the data files. 
+
+```{r}
+setwd("~/Documents/lecture")
+```
+
+# Loading files
+
+We have two different files that we need to get. One is the expression or count data where each row represents a gene and and each column is a sample. Then we have the metadata or `coldata` where different attributes of the samples are kept. Assuming our working directory is where these files are:
+
+```{r}
+counts<-read.table("pasilla_gene_counts.tsv", header = T, sep = "\t", row.names = "gene_id")
+head(counts)
+```
+
+```{r}
+coldata<-read.table("pasilla_sample_annotation.csv", header = T, sep = ",", row.names = 1)
+head(coldata)
+```
+
+In our coldata, we have some extra characters ("fb") we will get rid of that and then order the columns of our count data based on the order of the metadata. There is also the issue of factors. We need to have our variables (condition and type in this case) to be factors. And we also want to reorder the factors in a manner that makes more sense to us. By default R orders the factors alphabetically. 
+
+```{r}
+rownames(coldata) <- sub("fb", "", rownames(coldata))
+counts <- counts[, rownames(coldata)]
+coldata$condition <- factor(coldata$condition)
+coldata$type <- factor(coldata$type)
+coldata$condition<-relevel(coldata$condition, ref = "untreated") # we want untreated to be the baseline
+```
+
+# Differential Expression Analysis
+
+## Creating a DESeq object
+
+Now that we have all we need we can import our data to DESeq and perform differential expression. There are many ways to load count data to `DESeq2`. Because we now have a numeric matrix we will use the `DESeqDataSetFromMatrix` function. Pay close attention to the design section. Here we are only comparing conditions (untreated vs treated). However it is possible to have more complex designs. In that case you would need to specify your "contrasts". We will talk about that below. 
+
+```{r}
+suppressPackageStartupMessages(library(DESeq2))
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ condition)
+```
+
+## Pre filtering
+
+This is an optional step. In most RNA-Seq experiments we will have many genes with very low read counts or even 0. Removing these genes will reduce the memory impact and speed up the calculations. Let's pick an arbitrary value of 10, where we will remove all genes with a <10 read counts. 
+
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+```
+
+## The actual analysis
+
+Once our data is ready we can run the differential expression analysis with two lines of code. 
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds)
+res$sig<-ifelse(res$padj<0.05, T, F)
+head(res)
+```
+
+Let's go over these columns before we move on. `baseMean` is the average expression of that gene. It's not that useful since, it is the average of both conditions. `Log2FoldChange` is self explanatory. The next one is the "standard error" of the log fold change. Stat column gives you the coefficient estimate of the expression model. It can be useful in more complex analyses but here it is not that important. Finally we have pvalue and padj. The latter is the Benjamini-Hochberg adjusted p values for multiple testing. 
+
+## Contrasts
+
+Since we only specified one variable (condition), there is nothing to be confused about however with more than one variable we can specify the "contrasts" as such. 
+
+```{r}
+res <- results(dds, contrast=c("condition","treated","untreated"))
+```
+
+We have our differentially expressed genes, are we done?
+
+# Visualizations
+
+There are many visualizations that DESeq package offers out of the box. We will supplemenent these visualizations with other plots of our own. 
+
+## Data transformations
+
+Because we have different library sizes and types the number of reads that map to each gene in each library will be different. We are accounting for this difference in differential expression analysis but for visualization it would be nice to have a matrix of "normalized" counts. DESeq2 offers many transformation protocols. For brevity we will use just one. 
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+```
+
+## PCA
+
+PCA stands for principal component analysis. This is a dimensionality reduction method that relies on linear combination of terms (in our case gene expression values). These visualizations are useful for determining if there are any samples that are behaving in unexpected manners. For example in our dataset we have condition and library type. It would be of interest to see if sinlge vs paired end libraries behave differently.
+
+```{r}
+plotPCA(vsd, intgroup=c("condition", "type"))
+```
+
+We can see that the library type also matters when it comes to expression values. How about distances between samples?
+
+## Sample Distances
+
+```{r}
+library(pheatmap)
+sampleDists <- as.matrix(dist(t(assay(vsd))))
+rownames(sampleDists) <- paste(vsd$condition, vsd$type, sep="-")
+colnames(sampleDists) <- NULL
+pheatmap(sampleDists)
+```
+
+Again, we see the differences between single and paired end libraries. 
+
+## Scatterplots
+
+### Converting counts to TPM
+
+We used counts data to perform differential expression however TPM values are more stable then gene counts and are the preferred method for visualization. For that we are going to need gene lengths. We are going to use the gtf file and create a
+TxDb database for convenience. 
+
+
+```{r}
+library(GenomicFeatures)
+txdb<-makeTxDbFromGFF("Drosophila_melanogaster.BDGP5.25.62.gtf", format="gtf")
+
+gene_coords<-as.data.frame(genes(txdb))
+gene_coords<-gene_coords[gene_coords$gene_id %in% rownames(counts), ]
+gene_coords$width<-gene_coords$width/1000
+
+all(gene_coords$gene_id==rownames(counts))
+```
+
+Here are the steps to convert counts to TPMS:
+
+
++ Divide the read counts by the length of each gene in kilobases. This gives you reads per kilobase (RPK).
++ Count up all the RPK values in a sample and divide this number by 1,000,000. This is your “per million” scaling factor.
++ Divide the RPK values by the “per million” scaling factor. This gives you TPM.
+
+
+```{r}
+tpm_sorted<-counts[order(match(gene_coords$gene_id,rownames(counts))),]
+tpm_sorted<-sweep(tpm_sorted, 1, gene_coords$width, `/`)
+library_sizes<-colSums(tpm_sorted)/1000000
+tpm_sorted<-sweep(tpm_sorted, 2, library_sizes, `/`)
+tpm_sorted$gene<-rownames(tpm_sorted)
+
+colSums(tpm_sorted[, -8])
+```
+
+### Plotting
+
+We now have TPM values let's calculate average expression per condition. We will use an arbitrary threshold of 0.05 for the padj to call our genes significantly differentially expressed. 
+
+
+```{r}
+library(ggplot2)
+library(patchwork)
+avg_tpm<-data.frame(genes=rownames(tpm_sorted), 
+                    untreated=rowMeans(tpm_sorted[, grep("untreated", colnames(tpm_sorted))]),
+                    treated=rowMeans(tpm_sorted[, grep("treated", colnames(tpm_sorted))]))
+avg_tpm$sig<-ifelse(avg_tpm$genes %in% na.omit(rownames(res)[res$sig]) , T, F)
+
+expression<-ggplot(avg_tpm, aes(x=log2(untreated), y=log2(treated), color=sig))+geom_point()+scale_color_manual(values=c("black", "red"))
+volcano<-ggplot(as.data.frame(res), aes(x=log2FoldChange, y=-log10(padj), color=sig))+geom_point()+
+  geom_hline(yintercept = -log10(0.05), color="firebrick4", linetype="dotdash")+scale_color_manual(values=c("black", "red"))
+
+expression+volcano
+```
+
+
+## Heatmap
+
+We can use our tom values to draw a heatmap of our expression values. Since gene expression values show a wide dynamic range, just like our scatterplots we will use log2 expression values. Because we had a lot of 0s in our tpm matrix getting their log will result in `-Inf`. So we will remove all rows that have an infinite sum. 
+
+```{r}
+log2_tpm<-tpm_sorted
+log2_tpm[, -8]<-log2(log2_tpm[, -8]) 
+log2_tpm<-log2_tpm[is.finite(rowSums(log2_tpm[,-8])), ]
+pheatmap(log2_tpm[, -8], show_rownames = F, annotation_col = coldata[, c("condition", "type")])
+```
+
+
+# Using more than one variable
+
+We saw that the library type is an important factor. Let's repeat our differential expression analysis this time accounting for library type. 
+
+```{r}
+ddsMF <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = coldata,
+                              design = ~ type + condition)
+ddsMF<-DESeq(ddsMF)
+resMF<-results(ddsMF)
+head(resMF)
+```
+
+## Are they different?
+
+Let's set up an arbitrary significance threshold. We will call all genes with a padj < 0.05 significant. Did we get a different set of genes when we accounted for library size?
+
+```{r}
+library(Vennerable)
+
+condition_only<-na.omit(as.data.frame(res))
+type_and_condition<-na.omit(as.data.frame(resMF))
+
+venn=Venn(list(condition_only=rownames(condition_only[condition_only$padj<0.05,]), 
+               type_and_condition=rownames(type_and_condition[type_and_condition$padj<0.05,])))
+
+plot(venn, doWeights=F)
+```
+
+While there is quite a bit of overlap the differences are not trivial. Accounting for library type allowed us to identify more genes. 
+
+
+# Conclusions
+
+We performed a simple differential expression analysis and did some basic visualizations of our data. There is a lot more we have not covered such as gene set enrichment analysis, multifactor design and interaction terms, getting rid of known and unknown sources of variability etc. 
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
